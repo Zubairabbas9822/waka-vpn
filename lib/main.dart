@@ -11,6 +11,7 @@ import 'server_directory.dart';
 const _serverDirectoryUri = 'https://www.vpngate.net/api/iphone/';
 const _serverRequestTimeout = Duration(seconds: 20);
 const _maxDirectoryBytes = 12 * 1024 * 1024;
+const _connectionTimeout = Duration(seconds: 75);
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -56,11 +57,15 @@ class _WakaHomeState extends State<WakaHome> {
   bool _isLoadingServers = true;
   bool _isVpnReady = false;
   bool _isStartingConnection = false;
+  bool _hasPendingConnectionAttempt = false;
+  Timer? _connectionTimeoutTimer;
 
   bool get _isConnecting =>
       _isStartingConnection ||
+      _vpnStage == VPNStage.prepare ||
       _vpnStage == VPNStage.connecting ||
-      _vpnStage == VPNStage.authenticating;
+      _vpnStage == VPNStage.authenticating ||
+      _vpnStage == VPNStage.authentication;
 
   @override
   void initState() {
@@ -73,11 +78,40 @@ class _WakaHomeState extends State<WakaHome> {
     unawaited(_loadServers());
   }
 
-  void _onVpnStageChanged(VPNStage stage, String _) {
+  void _onVpnStageChanged(VPNStage stage, String rawStage) {
     if (!mounted) return;
+
+    final failedAfterProgress = stage == VPNStage.disconnected &&
+        _hasPendingConnectionAttempt &&
+        _vpnStage != VPNStage.disconnected;
+    final isTerminal = stage == VPNStage.connected ||
+        stage == VPNStage.denied ||
+        stage == VPNStage.error ||
+        failedAfterProgress;
+    if (isTerminal) {
+      _connectionTimeoutTimer?.cancel();
+      _hasPendingConnectionAttempt = false;
+    }
+
+    if (stage == VPNStage.error) {
+      debugPrint('OpenVPN reported an error stage: $rawStage');
+    }
     setState(() {
       _vpnStage = stage;
-      if (stage == VPNStage.connected) _connectionError = null;
+      if (stage == VPNStage.connected) {
+        _isStartingConnection = false;
+        _connectionError = null;
+      } else if (stage == VPNStage.denied) {
+        _isStartingConnection = false;
+        _connectionError =
+            'Android VPN permission was denied. Tap Connect and approve the system dialog.';
+      } else if (stage == VPNStage.error || failedAfterProgress) {
+        _isStartingConnection = false;
+        _connectionError =
+            'The VPN server could not connect. Try another server or network.';
+      } else if (stage != VPNStage.disconnected) {
+        _isStartingConnection = false;
+      }
     });
   }
 
@@ -168,10 +202,12 @@ class _WakaHomeState extends State<WakaHome> {
     });
   }
 
-  Future<void> _toggleVpn() async {
+  void _toggleVpn() {
     if (!_isVpnReady || _isConnecting) return;
 
     if (_vpnStage == VPNStage.connected) {
+      _connectionTimeoutTimer?.cancel();
+      _hasPendingConnectionAttempt = false;
       try {
         _openVPN.disconnect();
       } catch (error) {
@@ -186,36 +222,75 @@ class _WakaHomeState extends State<WakaHome> {
     final server = _selectedServer;
     if (server == null) return;
 
-    setState(() {
-      _isStartingConnection = true;
-      _connectionError = null;
-    });
-    unawaited(HapticFeedback.mediumImpact());
-
     try {
       final profile = utf8.decode(
         base64.decode(base64.normalize(server.config)),
         allowMalformed: false,
       );
-      final filteredProfile = await OpenVPN.filteredConfig(profile);
-      if (filteredProfile == null || filteredProfile.trim().isEmpty) {
-        throw const FormatException('VPN profile is invalid.');
+      if (!RegExp(r'^\s*remote\s+\S+', multiLine: true).hasMatch(profile)) {
+        throw const FormatException('VPN profile has no remote endpoint.');
       }
-      await _openVPN.connect(
-        filteredProfile,
+
+      setState(() {
+        _isStartingConnection = true;
+        _connectionError = null;
+      });
+      _hasPendingConnectionAttempt = true;
+      _connectionTimeoutTimer?.cancel();
+      _connectionTimeoutTimer = Timer(_connectionTimeout, _onConnectTimeout);
+      unawaited(HapticFeedback.mediumImpact());
+
+      // connect() itself calls Android VpnService.prepare(). The generated
+      // MainActivity must forward requestCode 24 to connectWhileGranted().
+      // Do not await this plugin Future: its Android method channel does not
+      // complete it, so actual progress is reported through VPN stage events.
+      final connectRequest = _openVPN.connect(
+        profile,
         server.country,
         username: 'vpn',
         password: 'vpn',
-        certIsRequired: false,
+        // VPN Gate profiles include inline CA/client certificates and keys.
+        certIsRequired: true,
+      );
+      unawaited(
+        connectRequest.then<void>(
+          (_) {},
+          onError: (Object error, StackTrace stackTrace) {
+            _handleConnectionError(error);
+          },
+        ),
       );
     } catch (error) {
-      debugPrint('VPN connection failed: $error');
-      if (mounted) {
-        setState(() => _connectionError = 'Connection failed. Choose another server or try again.');
-      }
-    } finally {
-      if (mounted) setState(() => _isStartingConnection = false);
+      _handleConnectionError(error);
     }
+  }
+
+  void _onConnectTimeout() {
+    if (!mounted || !_hasPendingConnectionAttempt) return;
+    _hasPendingConnectionAttempt = false;
+    setState(() {
+      _isStartingConnection = false;
+      _connectionError =
+          'Connection timed out. Allow the Android VPN prompt, then retry, or choose another server.';
+    });
+  }
+
+  void _handleConnectionError(Object error) {
+    debugPrint('VPN connection request failed: $error');
+    _connectionTimeoutTimer?.cancel();
+    _hasPendingConnectionAttempt = false;
+    if (!mounted) return;
+    setState(() {
+      _isStartingConnection = false;
+      _connectionError =
+          'Could not start the VPN. Allow the Android VPN prompt and try again.';
+    });
+  }
+
+  @override
+  void dispose() {
+    _connectionTimeoutTimer?.cancel();
+    super.dispose();
   }
 
   @override
@@ -253,7 +328,9 @@ class _WakaHomeState extends State<WakaHome> {
                   Text(
                     isConnected
                         ? 'CONNECTED • ${_selectedCountry ?? 'VPN'}'
-                        : (isBusy ? 'CONNECTING…' : 'SELECT A SERVER TO CONNECT'),
+                        : (_isStartingConnection && _vpnStage == VPNStage.disconnected
+                            ? 'WAITING FOR ANDROID VPN APPROVAL…'
+                            : (isBusy ? 'CONNECTING…' : 'SELECT A SERVER TO CONNECT')),
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: isConnected
@@ -268,7 +345,7 @@ class _WakaHomeState extends State<WakaHome> {
                     label: isConnected ? 'Disconnect VPN' : 'Connect VPN',
                     child: GestureDetector(
                       onTap: _isVpnReady && !isBusy && _selectedServer != null
-                          ? () => unawaited(_toggleVpn())
+                          ? _toggleVpn
                           : null,
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),

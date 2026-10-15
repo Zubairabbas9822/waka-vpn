@@ -14,12 +14,13 @@ The app retrieves the server directory over HTTPS only. It does not fall back to
 
 ## Build
 
-The GitHub Actions workflow generates the Android project files, runs `flutter analyze` and the test suite, and builds both an APK and an Android App Bundle. The generated APK and AAB are uploaded as workflow artifacts. The artifacts are not configured with a store-release signing key.
+The GitHub Actions workflow generates the Android project files, applies the OpenVPN permission callback and native-library packaging settings, runs the Android configuration tests plus `flutter analyze` and Flutter tests, and builds both an APK and an Android App Bundle. The generated APK and AAB are uploaded as workflow artifacts. The artifacts are not configured with a store-release signing key.
 
 To build locally with Flutter installed:
 
 ```sh
 flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
+python3 tool/configure_android.py
 flutter pub get
 flutter analyze
 flutter test
@@ -27,4 +28,4 @@ flutter build apk --release
 flutter build appbundle --release
 ```
 
-The Android project targets API level 24 or later for the OpenVPN plugin.
+The Android project targets API level 24 or later for the OpenVPN plugin. On the first connection, Android displays its system VPN consent dialog; approve it to let the plugin start the tunnel. If permission is cancelled, tap Connect again and approve the prompt.

@@ -36,9 +36,10 @@ jobs:
       - name: Generate Android project files
         run: |
           flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle || true
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle || true
-          echo "flutter.minSdkVersion=24" >> android/local.properties
+          python3 tool/configure_android.py
+
+      - name: Test generated Android configuration
+        run: python3 -m unittest discover -s tool -p 'test_*.py'
 
       - name: Install dependencies
         run: flutter pub get
