@@ -93,7 +93,6 @@ class WakaHomeScreen extends StatefulWidget {
 
 class _WakaHomeScreenState extends State<WakaHomeScreen>
     with TickerProviderStateMixin {
-  // 0 = Disconnected, 1 = Connecting, 2 = Connected
   int _connectionState = 0;
   bool _isUserVip = false;
 
@@ -196,7 +195,6 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
 
       setState(() => _connectionState = 1);
 
-      // Simulate secure tunnel handshake
       Future.delayed(const Duration(seconds: 2), () {
         if (!mounted) return;
         HapticFeedback.heavyImpact();
@@ -584,4 +582,6 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
                     child: BackdropFilter(
                       filter: ImageFilter.blur(sigmaX: 14, sigmaY: 14),
                       child: Container(
-                        padding: const Ed
+                        padding: const EdgeInsets.all(18),
+                        decoration: BoxDecoration(
+                          
