@@ -24,12 +24,13 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Auto-Generate Android Scaffold Cleanly
+      - name: Auto-Generate Android Configs
         run: |
           flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
-          # Fix minSdk for OpenVPN package
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
-          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
+          # Fix Android SDK versions forcefully for OpenVPN
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 24/g' android/app/build.gradle || true
+          sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 24/g' android/app/build.gradle || true
+          echo "flutter.minSdkVersion=24" >> android/local.properties
 
       - name: Install Dependencies
         run: flutter pub get
@@ -42,3 +43,4 @@ jobs:
         with:
           name: WAKA-VPN-Release-APK
           path: build/app/outputs/flutter-apk/app-release.apk
+          
