@@ -67,8 +67,7 @@ class ConfigureAndroidTests(unittest.TestCase):
             self.assertEqual(activity.count("connectWhileGranted"), 1)
             self.assertIn('android:extractNativeLibs="true"', manifest)
             self.assertEqual(manifest.count("android:extractNativeLibs"), 1)
-            self.assertIn("android.bundle.enableUncompressedNativeLibs=false", properties)
-            self.assertEqual(properties.count("android.bundle.enableUncompressedNativeLibs"), 1)
+            self.assertNotIn("android.bundle.enableUncompressedNativeLibs", properties)
             self.assertIn("minSdk = 24", gradle)
             self.assertIn("useLegacyPackaging = true", gradle)
             self.assertEqual(gradle.count("packaging {"), 1)
@@ -92,6 +91,28 @@ class ConfigureAndroidTests(unittest.TestCase):
             self.assertIn("minSdkVersion 24", gradle)
             self.assertIn("useLegacyPackaging true", gradle)
             self.assertIn("packagingOptions {", gradle)
+
+    def test_removes_obsolete_android_bundle_setting(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.make_project(
+                root,
+                "build.gradle.kts",
+                "android {\n    defaultConfig {\n        minSdk = 24\n    }\n}\n",
+            )
+            properties = root / "android/gradle.properties"
+            properties.write_text(
+                "android.bundle.enableUncompressedNativeLibs=false\n"
+                "org.gradle.jvmargs=-Xmx2g\n",
+                encoding="utf-8",
+            )
+
+            configure_android(root)
+
+            self.assertNotIn(
+                "android.bundle.enableUncompressedNativeLibs", properties.read_text()
+            )
+            self.assertIn("org.gradle.jvmargs=-Xmx2g", properties.read_text())
 
 
 if __name__ == "__main__":

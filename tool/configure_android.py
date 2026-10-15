@@ -63,16 +63,16 @@ def _configure_manifest(android_dir: Path) -> None:
 
 def _configure_gradle_properties(android_dir: Path) -> None:
     properties = android_dir / "gradle.properties"
-    content = properties.read_text(encoding="utf-8") if properties.exists() else ""
-    setting = "android.bundle.enableUncompressedNativeLibs=false"
-    if re.search(r"(?m)^\s*android\.bundle\.enableUncompressedNativeLibs\s*=", content):
-        content = re.sub(
-            r"(?m)^\s*android\.bundle\.enableUncompressedNativeLibs\s*=.*$",
-            setting,
-            content,
-        )
-    else:
-        content = content.rstrip() + "\n" + setting + "\n"
+    if not properties.exists():
+        return
+    content = properties.read_text(encoding="utf-8")
+    # This option was removed in Android Gradle Plugin 8.1+; older plugin
+    # README guidance to add it makes current Flutter builds fail outright.
+    content = re.sub(
+        r"(?m)^\s*android\.bundle\.enableUncompressedNativeLibs\s*=.*(?:\n|$)",
+        "",
+        content,
+    )
     properties.write_text(content, encoding="utf-8")
 
 
