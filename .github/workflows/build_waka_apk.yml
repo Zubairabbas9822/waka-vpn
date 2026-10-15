@@ -24,25 +24,22 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Auto-Generate Android Scaffold
+      - name: Auto-Generate Android Scaffold Cleanly
         run: |
-          cp pubspec.yaml pubspec.yaml.bak
-          cp lib/main.dart main.dart.bak
-
           flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
 
-          mv pubspec.yaml.bak pubspec.yaml
-          mv main.dart.bak lib/main.dart
-
-          # Enforce MinSdk 21 and MultiDex for OpenVPN
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21\n        multiDexEnabled true/g' android/app/build.gradle || true
+          # Fix minSdk to 21 inside build.gradle for modern compatibility
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
-          
-          # Add internet and vpn permissions to manifest
-          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application/g' android/app/src/main/AndroidManifest.xml
 
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Build APK
+      - name: Build APK Release
         run: flutter build apk --release
+
+      - name: Upload Artifact APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: WAKA-VPN-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
