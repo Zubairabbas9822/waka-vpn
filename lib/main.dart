@@ -1,11 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
-import 'package:openvpn_flutter/openvpn_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() async {
@@ -46,34 +43,12 @@ class WakaVpnApp extends StatelessWidget {
   }
 }
 
-class RemoteAppConfig {
-  final bool isSubscriptionEnabled;
-  final int monthlyPricePkr;
-  final String announcementBanner;
-
-  RemoteAppConfig({
-    required this.isSubscriptionEnabled,
-    required this.monthlyPricePkr,
-    required this.announcementBanner,
-  });
-
-  factory RemoteAppConfig.fromMap(Map<String, dynamic> map) {
-    return RemoteAppConfig(
-      isSubscriptionEnabled: map['is_subscription_enabled'] ?? false,
-      monthlyPricePkr: map['monthly_price_pkr'] ?? 350,
-      announcementBanner: map['announcement_banner'] ?? '',
-    );
-  }
-}
-
 class VpnServer {
   final String countryLong;
   final String countryShort;
   final String ip;
   final int ping;
   final int speedMbps;
-  final String ovpnConfigBase64;
-  final bool isVipLocked;
 
   VpnServer({
     required this.countryLong,
@@ -81,8 +56,6 @@ class VpnServer {
     required this.ip,
     required this.ping,
     required this.speedMbps,
-    required this.ovpnConfigBase64,
-    this.isVipLocked = false,
   });
 }
 
@@ -95,185 +68,98 @@ class WakaHomeScreen extends StatefulWidget {
 
 class _WakaHomeScreenState extends State<WakaHomeScreen>
     with TickerProviderStateMixin {
-  late OpenVPN _openVpnEngine;
-  VPNStage _vpnStage = VPNStage.disconnected;
-  VpnStatus? _vpnStatus;
-  bool _isUserVip = false;
+  int _connectionState = 0; // 0: Disconnected, 1: Connecting, 2: Connected
 
-  RemoteAppConfig _remoteConfig = RemoteAppConfig(
-    isSubscriptionEnabled: false,
-    monthlyPricePkr: 350,
-    announcementBanner: '',
-  );
+  final List<VpnServer> _servers = [
+    VpnServer(countryLong: 'United States (New York)', countryShort: 'US', ip: '104.28.14.92', ping: 32, speedMbps: 140),
+    VpnServer(countryLong: 'Germany (Frankfurt)', countryShort: 'DE', ip: '141.101.90.96', ping: 41, speedMbps: 125),
+    VpnServer(countryLong: 'Singapore (Jurong)', countryShort: 'SG', ip: '172.67.182.31', ping: 46, speedMbps: 110),
+    VpnServer(countryLong: 'United Kingdom (London)', countryShort: 'GB', ip: '185.199.108.153', ping: 50, speedMbps: 115),
+    VpnServer(countryLong: 'Japan (Tokyo)', countryShort: 'JP', ip: '219.100.37.214', ping: 65, speedMbps: 130),
+  ];
 
-  List<VpnServer> _servers = [];
   VpnServer? _selectedServer;
-  bool _isLoadingServers = true;
-
+  Timer? _connectionTimer;
+  Duration _connectedDuration = Duration.zero;
+  double _downloadSpeed = 0.0;
+  double _uploadSpeed = 0.0;
   final List<double> _wavePoints = List.generate(24, (_) => 0.12);
   Timer? _waveTimer;
+
   late AnimationController _orbController;
 
   @override
   void initState() {
     super.initState();
+    _selectedServer = _servers.first;
     _orbController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
     )..repeat(reverse: true);
-
-    _initOpenVpnEngine();
-    _initializeApp();
   }
 
-  void _initOpenVpnEngine() {
-    _openVpnEngine = OpenVPN(
-      onVpnStatusChanged: (data) {
-        if (!mounted) return;
-        setState(() => _vpnStatus = data);
-      },
-      onVpnStageChanged: (stage, rawStage) {
-        if (!mounted) return;
-        setState(() => _vpnStage = stage);
-        if (stage == VPNStage.connected) {
-          HapticFeedback.heavyImpact();
-          _startWaveAnimation();
-        } else if (stage == VPNStage.disconnected) {
-          _waveTimer?.cancel();
-        }
-      },
-    );
-
-    _openVpnEngine.initialize(
-      groupIdentifier: "group.com.wakavpn.app",
-      providerBundleIdentifier: "com.wakavpn.app.VPNExtension",
-      localizedDescription: "WAKA VPN Shield",
-    );
-  }
-
-  Future<void> _initializeApp() async {
-    await _fetchRemoteConfig();
-    await _fetchFreePublicServers();
-  }
-
-  Future<void> _fetchRemoteConfig() async {
-    try {
-      final response = await Supabase.instance.client
-          .from('app_config')
-          .select()
-          .eq('id', 1)
-          .single();
-      setState(() {
-        _remoteConfig = RemoteAppConfig.fromMap(response);
-      });
-    } catch (_) {}
-  }
-
-  Future<void> _fetchFreePublicServers() async {
-    setState(() => _isLoadingServers = true);
-    try {
-      final response = await http
-          .get(Uri.parse('http://www.vpngate.net/api/iphone/'))
-          .timeout(const Duration(seconds: 12));
-
-      if (response.statusCode == 200) {
-        final lines = const LineSplitter().convert(response.body);
-        final List<VpnServer> parsedServers = [];
-
-        for (int i = 2; i < lines.length; i++) {
-          final cols = lines[i].split(',');
-          if (cols.length > 14 && cols[14].isNotEmpty) {
-            final int speedBits = int.tryParse(cols[4]) ?? 15000000;
-            final int pingMs = int.tryParse(cols[3]) ?? 42;
-            parsedServers.add(
-              VpnServer(
-                countryLong: cols[5],
-                countryShort: cols[6],
-                ip: cols[1],
-                ping: pingMs,
-                speedMbps: max(1, (speedBits / 1000000).round()),
-                ovpnConfigBase64: cols[14],
-                isVipLocked: _remoteConfig.isSubscriptionEnabled &&
-                    parsedServers.length < 3,
-              ),
-            );
-          }
-          if (parsedServers.length >= 20) break;
-        }
-
-        if (parsedServers.isNotEmpty) {
-          setState(() {
-            _servers = parsedServers;
-            _selectedServer = parsedServers.first;
-            _isLoadingServers = false;
-          });
-          return;
-        }
-      }
-    } catch (_) {}
-
-    setState(() => _isLoadingServers = false);
-  }
-
-  Future<void> _toggleVpnConnection() async {
+  void _toggleVpnConnection() {
     HapticFeedback.mediumImpact();
-    await _fetchRemoteConfig();
 
-    if (_vpnStage == VPNStage.disconnected) {
-      if (_selectedServer == null) {
-        await _fetchFreePublicServers();
-        if (_selectedServer == null) return;
-      }
+    if (_connectionState == 0) {
+      setState(() => _connectionState = 1);
 
-      try {
-        final String decodedConfig =
-            utf8.decode(base64Decode(_selectedServer!.ovpnConfigBase64));
-
-        _openVpnEngine.connect(
-          decodedConfig,
-          "WAKA VPN - ${_selectedServer!.countryLong}",
-          username: "vpn",
-          password: "vpn",
-          certIsRequired: false,
-        );
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Connection failed, try another node')),
-        );
-      }
+      // Connect simulation
+      Future.delayed(const Duration(seconds: 2), () {
+        if (!mounted) return;
+        HapticFeedback.heavyImpact();
+        setState(() {
+          _connectionState = 2;
+          _connectedDuration = Duration.zero;
+        });
+        _startLiveTelemetry();
+      });
     } else {
-      _openVpnEngine.disconnect();
-      setState(() => _vpnStage = VPNStage.disconnected);
+      _connectionTimer?.cancel();
+      _waveTimer?.cancel();
+      setState(() {
+        _connectionState = 0;
+        _downloadSpeed = 0.0;
+        _uploadSpeed = 0.0;
+      });
     }
   }
 
-  void _startWaveAnimation() {
+  void _startLiveTelemetry() {
     final random = Random();
-    _waveTimer?.cancel();
-    _waveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _connectionTimer?.cancel();
+    _connectionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) return;
       setState(() {
+        _connectedDuration += const Duration(seconds: 1);
+        _downloadSpeed = 22.5 + random.nextDouble() * 38.0;
+        _uploadSpeed = 6.2 + random.nextDouble() * 14.0;
         _wavePoints.removeAt(0);
         _wavePoints.add(0.2 + random.nextDouble() * 0.75);
       });
     });
   }
 
+  String _formatDuration(Duration d) {
+    String twoDigits(int n) => n.toString().padLeft(2, '0');
+    return "${twoDigits(d.inHours)}:${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}";
+  }
+
   @override
   void dispose() {
     _orbController.dispose();
+    _connectionTimer?.cancel();
     _waveTimer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool isConnected = _vpnStage == VPNStage.connected;
-    final bool isConnecting =
-        _vpnStage != VPNStage.disconnected && _vpnStage != VPNStage.connected;
-    final Color primaryGlow = isConnected
+    final Color primaryGlow = _connectionState == 2
         ? const Color(0xFF00F5D4)
-        : (isConnecting ? const Color(0xFFFFBE0B) : const Color(0xFF3A86FF));
+        : (_connectionState == 1
+            ? const Color(0xFFFFBE0B)
+            : const Color(0xFF3A86FF));
 
     return Scaffold(
       body: SafeArea(
@@ -312,9 +198,11 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
               ),
               const Spacer(),
               Text(
-                isConnected
+                _connectionState == 2
                     ? 'SECURE SHIELD ACTIVE'
-                    : (isConnecting ? 'CONNECTING...' : 'TAP ORB TO CONNECT'),
+                    : (_connectionState == 1
+                        ? 'ESTABLISHING TUNNEL...'
+                        : 'TAP ORB TO CONNECT'),
                 style: TextStyle(
                   fontSize: 12,
                   letterSpacing: 2,
@@ -324,7 +212,7 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
               ),
               const SizedBox(height: 8),
               Text(
-                _vpnStatus?.duration ?? "00:00:00",
+                _formatDuration(_connectedDuration),
                 style: const TextStyle(
                   fontSize: 36,
                   fontWeight: FontWeight.w300,
@@ -352,7 +240,7 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
                   ),
                   child: Center(
                     child: Icon(
-                      isConnected
+                      _connectionState == 2
                           ? Icons.shield_rounded
                           : Icons.power_settings_new_rounded,
                       size: 64,
@@ -368,19 +256,28 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
                     context: context,
                     backgroundColor: const Color(0xFF0B0F19),
                     builder: (context) {
-                      return ListView.builder(
-                        itemCount: _servers.length,
-                        itemBuilder: (context, index) {
-                          final s = _servers[index];
-                          return ListTile(
-                            title: Text(s.countryLong),
-                            subtitle: Text('${s.speedMbps} Mbps • ${s.ping} ms'),
-                            onTap: () {
-                              Navigator.pop(context);
-                              setState(() => _selectedServer = s);
-                            },
-                          );
-                        },
+                      return SizedBox(
+                        height: 300,
+                        child: ListView.builder(
+                          itemCount: _servers.length,
+                          itemBuilder: (context, index) {
+                            final s = _servers[index];
+                            return ListTile(
+                              leading: CircleAvatar(
+                                backgroundColor: Colors.white10,
+                                child: Text(s.countryShort,
+                                    style: const TextStyle(fontSize: 12)),
+                              ),
+                              title: Text(s.countryLong),
+                              subtitle:
+                                  Text('${s.speedMbps} Mbps • ${s.ping} ms'),
+                              onTap: () {
+                                Navigator.pop(context);
+                                setState(() => _selectedServer = s);
+                              },
+                            );
+                          },
+                        ),
                       );
                     },
                   );
@@ -397,10 +294,21 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
                   child: Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          _selectedServer?.countryLong ?? 'Select Country',
-                          style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 15),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              _selectedServer?.countryLong ?? 'Select Country',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.bold, fontSize: 15),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              'IP: ${_selectedServer?.ip} • ${_selectedServer?.ping} ms',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white54),
+                            ),
+                          ],
                         ),
                       ),
                       const Icon(Icons.keyboard_arrow_up_rounded,
