@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -8,10 +7,7 @@ import 'package:openvpn_flutter/openvpn_flutter.dart';
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setSystemUIOverlayStyle(
-    const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.light,
-    ),
+    const SystemUiOverlayStyle(statusBarColor: Colors.transparent),
   );
   runApp(const WakaVpnApp());
 }
@@ -22,237 +18,153 @@ class WakaVpnApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'WAKA VPN',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF07090E),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF00F5D4),
-          secondary: Color(0xFF7B2CBF),
-        ),
+        colorScheme: const ColorScheme.dark(primary: Color(0xFF00F5D4)),
       ),
-      home: const WakaHomeScreen(),
+      home: const WakaHome(),
     );
   }
 }
 
 class VpnServer {
-  final String countryLong;
-  final String countryShort;
+  final String country;
   final String ip;
-  final int speed;
-  final String ovpnConfig;
+  final String config;
 
-  VpnServer({
-    required this.countryLong,
-    required this.countryShort,
-    required this.ip,
-    required this.speed,
-    required this.ovpnConfig,
-  });
+  VpnServer(this.country, this.ip, this.config);
 }
 
-class WakaHomeScreen extends StatefulWidget {
-  const WakaHomeScreen({super.key});
+class WakaHome extends StatefulWidget {
+  const WakaHome({super.key});
 
   @override
-  State<WakaHomeScreen> createState() => _WakaHomeScreenState();
+  State<WakaHome> createState() => _WakaHomeState();
 }
 
-class _WakaHomeScreenState extends State<WakaHomeScreen> {
-  late OpenVPN _openVPN;
-  VPNStage _vpnStage = VPNStage.disconnected;
-  VpnStatus? _vpnStatus;
-  
-  List<VpnServer> _servers = [];
-  VpnServer? _selectedServer;
-  bool _isLoadingServers = true;
+class _WakaHomeState extends State<WakaHome> {
+  late OpenVPN openVPN;
+  VPNStage vpnStage = VPNStage.disconnected;
+  List<VpnServer> servers = [];
+  VpnServer? selectedServer;
+  bool isLoading = true;
 
   @override
   void initState() {
     super.initState();
-    _initOpenVPN();
-    _fetchServers();
-  }
-
-  void _initOpenVPN() {
-    _openVPN = OpenVPN(
-      onVpnStatusChanged: (data) {
-        setState(() => _vpnStatus = data);
-      },
-      onVpnStageChanged: (stage, rawStage) {
-        setState(() => _vpnStage = stage);
-        if (stage == VPNStage.connected) {
-          HapticFeedback.heavyImpact();
-        }
-      },
+    openVPN = OpenVPN(
+      onVpnStageChanged: (stage, _) => setState(() => vpnStage = stage),
+      onVpnStatusChanged: (_) {},
     );
-    _openVPN.initialize(
+    openVPN.initialize(
       groupIdentifier: "group.com.wakavpn.app",
       providerBundleIdentifier: "com.wakavpn.app.VPNExtension",
-      localizedDescription: "WAKA VPN Shield",
+      localizedDescription: "WAKA VPN",
     );
+    _loadServers();
   }
 
-  Future<void> _fetchServers() async {
-    setState(() => _isLoadingServers = true);
+  Future<void> _loadServers() async {
     try {
-      final response = await http.get(Uri.parse('http://www.vpngate.net/api/iphone/'));
-      if (response.statusCode == 200) {
-        final lines = const LineSplitter().convert(response.body);
-        final List<VpnServer> parsedServers = [];
-
+      final res = await http.get(Uri.parse('http://www.vpngate.net/api/iphone/'));
+      if (res.statusCode == 200) {
+        final lines = const LineSplitter().convert(res.body);
         for (int i = 2; i < lines.length; i++) {
           final cols = lines[i].split(',');
           if (cols.length > 14 && cols[14].isNotEmpty) {
-            parsedServers.add(
-              VpnServer(
-                countryLong: cols[5],
-                countryShort: cols[6],
-                ip: cols[1],
-                speed: (int.parse(cols[4]) / 1000000).round(),
-                ovpnConfig: cols[14],
-              ),
-            );
+            servers.add(VpnServer(cols[5], cols[1], cols[14]));
           }
         }
-        
-        if (parsedServers.isNotEmpty) {
-          setState(() {
-            _servers = parsedServers;
-            _selectedServer = parsedServers.first;
-          });
-        }
+        if (servers.isNotEmpty) selectedServer = servers.first;
       }
     } catch (e) {
-      debugPrint("Error fetching: $e");
+      debugPrint("Error fetching API");
     }
-    setState(() => _isLoadingServers = false);
+    setState(() => isLoading = false);
   }
 
-  void _toggleConnection() {
-    HapticFeedback.mediumImpact();
-    if (_vpnStage == VPNStage.disconnected) {
-      if (_selectedServer == null) return;
-      
-      try {
-        final decodedConfig = utf8.decode(base64Decode(_selectedServer!.ovpnConfig));
-        _openVPN.connect(
-          decodedConfig,
-          "WAKA - ${_selectedServer!.countryLong}",
-          username: "vpn",
-          password: "vpn",
-          certIsRequired: false,
-        );
-      } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to load server config')),
-        );
-      }
+  void _toggle() {
+    if (vpnStage == VPNStage.disconnected && selectedServer != null) {
+      HapticFeedback.heavyImpact();
+      final config = utf8.decode(base64Decode(selectedServer!.config));
+      openVPN.connect(
+        config,
+        selectedServer!.country,
+        username: "vpn",
+        password: "vpn",
+        certIsRequired: false,
+      );
     } else {
-      _openVPN.disconnect();
+      openVPN.disconnect();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final bool isConnected = _vpnStage == VPNStage.connected;
-    final bool isConnecting = _vpnStage == VPNStage.connecting || _vpnStage == VPNStage.authenticating || _vpnStage == VPNStage.tcp_connect;
-    final Color primaryGlow = isConnected ? const Color(0xFF00F5D4) : (isConnecting ? const Color(0xFFFFBE0B) : const Color(0xFF3A86FF));
+    final isConnected = vpnStage == VPNStage.connected;
+    final isConnecting = vpnStage == VPNStage.connecting || vpnStage == VPNStage.authenticating;
 
     return Scaffold(
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(22.0),
-          child: Column(
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text('WAKA VPN', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w900, letterSpacing: 3)),
-                  if (_isLoadingServers)
-                    const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF00F5D4)))
-                  else
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(color: Colors.white.withOpacity(0.06), borderRadius: BorderRadius.circular(20)),
-                      child: Text('${_servers.length} SERVERS', style: const TextStyle(color: Color(0xFF00F5D4), fontSize: 11, fontWeight: FontWeight.w700)),
-                    ),
-                ],
-              ),
-              const Spacer(),
-              Text(
-                isConnected ? 'REAL SECURE SHIELD ACTIVE' : (isConnecting ? 'CONNECTING REAL TUNNEL...' : 'TAP ORB TO CONNECT'),
-                style: TextStyle(fontSize: 12, letterSpacing: 2, fontWeight: FontWeight.w700, color: primaryGlow),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                _vpnStatus?.duration ?? "00:00:00",
-                style: const TextStyle(fontSize: 36, fontWeight: FontWeight.w300, letterSpacing: 3),
-              ),
-              const SizedBox(height: 32),
-              GestureDetector(
-                onTap: _toggleConnection,
-                child: Container(
-                  width: 190,
-                  height: 190,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: RadialGradient(colors: [primaryGlow.withOpacity(0.45), const Color(0xFF0D1322)]),
-                    border: Border.all(color: primaryGlow.withOpacity(0.8), width: 2.5),
-                  ),
-                  child: Center(
-                    child: Icon(isConnected ? Icons.shield_rounded : Icons.power_settings_new_rounded, size: 64, color: Colors.white),
-                  ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              'WAKA VPN',
+              style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: Color(0xFF00F5D4), letterSpacing: 2),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              isConnected ? 'SHIELD SECURED' : (isConnecting ? 'REQUESTING PERMISSION...' : 'TAP TO SECURE'),
+              style: TextStyle(color: isConnected ? const Color(0xFF00F5D4) : Colors.white70, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 60),
+            GestureDetector(
+              onTap: _toggle,
+              child: Container(
+                width: 180,
+                height: 180,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: isConnected ? const Color(0xFF00F5D4) : const Color(0xFF151A25),
+                  border: Border.all(color: const Color(0xFF00F5D4), width: 3),
+                  boxShadow: [
+                    if (isConnected) BoxShadow(color: const Color(0xFF00F5D4).withOpacity(0.5), blurRadius: 40)
+                  ],
+                ),
+                child: Icon(
+                  Icons.power_settings_new_rounded,
+                  size: 80,
+                  color: isConnected ? Colors.black : Colors.white,
                 ),
               ),
-              const Spacer(),
-              GestureDetector(
-                onTap: () {
-                  showModalBottomSheet(
-                    context: context,
-                    backgroundColor: const Color(0xFF0B0F19),
-                    builder: (context) {
-                      return ListView.builder(
-                        itemCount: _servers.length,
-                        itemBuilder: (context, index) {
-                          final s = _servers[index];
-                          return ListTile(
-                            leading: Text(s.countryShort, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white54)),
-                            title: Text(s.countryLong),
-                            subtitle: Text('IP: ${s.ip} • Speed: ${s.speed} Mbps'),
-                            onTap: () {
-                              Navigator.pop(context);
-                              setState(() => _selectedServer = s);
-                            },
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.06),
-                    borderRadius: BorderRadius.circular(22),
-                    border: Border.all(color: primaryGlow.withOpacity(0.35), width: 1.2),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          _selectedServer?.countryLong ?? 'Select Server...',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                        ),
-                      ),
-                      const Icon(Icons.keyboard_arrow_up_rounded, color: Colors.white70),
-                    ],
-                  ),
+            ),
+            const SizedBox(height: 60),
+            if (isLoading)
+              const CircularProgressIndicator(color: Color(0xFF00F5D4))
+            else if (servers.isEmpty)
+              const Text('No Servers Found', style: TextStyle(color: Colors.redAccent))
+            else
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.05),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: DropdownButton<VpnServer>(
+                  value: selectedServer,
+                  dropdownColor: const Color(0xFF0B0F19),
+                  underline: const SizedBox(),
+                  icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF00F5D4)),
+                  items: servers.map((s) => DropdownMenuItem(
+                    value: s,
+                    child: Text('${s.country} • IP: ${s.ip}', style: const TextStyle(fontSize: 14)),
+                  )).toList(),
+                  onChanged: (val) => setState(() => selectedServer = val),
                 ),
               ),
-            ],
-          ),
+          ],
         ),
       ),
     );
