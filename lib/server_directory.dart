@@ -15,7 +15,7 @@ class VpnServer {
 List<VpnServer> parseVpnGateResponse(String response) {
   final servers = <VpnServer>[];
   final validBase64 = RegExp(r'^[A-Za-z0-9+/]+={0,2}$');
-  final hasRemoteDirective = RegExp(r'(?m)^\s*remote\s+\S+');
+  final hasRemoteDirective = RegExp(r'^\s*remote\s+\S+', multiLine: true);
 
   for (final rawLine in const LineSplitter().convert(response)) {
     final line = rawLine.trim();

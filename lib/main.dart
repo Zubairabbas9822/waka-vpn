@@ -412,7 +412,7 @@ class _WakaHomeState extends State<WakaHome> {
 }
 
 class _PickerLabel extends StatelessWidget {
-  const _PickerLabel(this.label, {super.key});
+  const _PickerLabel(this.label);
 
   final String label;
 
@@ -432,7 +432,7 @@ class _PickerLabel extends StatelessWidget {
 }
 
 class _PickerContainer extends StatelessWidget {
-  const _PickerContainer({super.key, required this.child});
+  const _PickerContainer({required this.child});
 
   final Widget child;
 
@@ -450,7 +450,7 @@ class _PickerContainer extends StatelessWidget {
 }
 
 class _ServerError extends StatelessWidget {
-  const _ServerError({super.key, required this.message, required this.onRetry});
+  const _ServerError({required this.message, required this.onRetry});
 
   final String message;
   final VoidCallback onRetry;
