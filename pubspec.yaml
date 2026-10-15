@@ -1,5 +1,5 @@
 name: waka_vpn
-description: WAKA VPN - Ultra-Fast Multi-Country VPN.
+description: WAKA VPN - Ultra-Fast Zero-Budget Multi-Country VPN with Remote Paywall.
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -10,7 +10,6 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.2.0
-  openvpn_flutter: ^1.3.2
   supabase_flutter: ^2.5.0
   shared_preferences: ^2.2.3
 
