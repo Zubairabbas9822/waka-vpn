@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:http/http.dart' as http;
+import 'package:openvpn_flutter/openvpn_flutter.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 void main() async {
@@ -46,13 +49,11 @@ class WakaVpnApp extends StatelessWidget {
 class RemoteAppConfig {
   final bool isSubscriptionEnabled;
   final int monthlyPricePkr;
-  final int freeDailyLimitMinutes;
   final String announcementBanner;
 
   RemoteAppConfig({
     required this.isSubscriptionEnabled,
     required this.monthlyPricePkr,
-    required this.freeDailyLimitMinutes,
     required this.announcementBanner,
   });
 
@@ -60,7 +61,6 @@ class RemoteAppConfig {
     return RemoteAppConfig(
       isSubscriptionEnabled: map['is_subscription_enabled'] ?? false,
       monthlyPricePkr: map['monthly_price_pkr'] ?? 350,
-      freeDailyLimitMinutes: map['free_daily_limit_minutes'] ?? 0,
       announcementBanner: map['announcement_banner'] ?? '',
     );
   }
@@ -72,6 +72,7 @@ class VpnServer {
   final String ip;
   final int ping;
   final int speedMbps;
+  final String ovpnConfigBase64;
   final bool isVipLocked;
 
   VpnServer({
@@ -80,6 +81,7 @@ class VpnServer {
     required this.ip,
     required this.ping,
     required this.speedMbps,
+    required this.ovpnConfigBase64,
     this.isVipLocked = false,
   });
 }
@@ -93,79 +95,65 @@ class WakaHomeScreen extends StatefulWidget {
 
 class _WakaHomeScreenState extends State<WakaHomeScreen>
     with TickerProviderStateMixin {
-  int _connectionState = 0; // 0: Disconnected, 1: Connecting, 2: Connected
+  late OpenVPN _openVpnEngine;
+  VPNStage _vpnStage = VPNStage.disconnected;
+  VpnStatus? _vpnStatus;
   bool _isUserVip = false;
 
   RemoteAppConfig _remoteConfig = RemoteAppConfig(
     isSubscriptionEnabled: false,
     monthlyPricePkr: 350,
-    freeDailyLimitMinutes: 0,
     announcementBanner: '',
   );
 
-  final List<VpnServer> _servers = [
-    VpnServer(
-      countryLong: 'United States (New York)',
-      countryShort: 'US',
-      ip: '104.28.14.92',
-      ping: 32,
-      speedMbps: 140,
-      isVipLocked: false,
-    ),
-    VpnServer(
-      countryLong: 'Germany (Frankfurt)',
-      countryShort: 'DE',
-      ip: '141.101.90.96',
-      ping: 41,
-      speedMbps: 125,
-      isVipLocked: false,
-    ),
-    VpnServer(
-      countryLong: 'Singapore (Jurong)',
-      countryShort: 'SG',
-      ip: '172.67.182.31',
-      ping: 46,
-      speedMbps: 110,
-      isVipLocked: false,
-    ),
-    VpnServer(
-      countryLong: 'United Kingdom (London)',
-      countryShort: 'GB',
-      ip: '185.199.108.153',
-      ping: 50,
-      speedMbps: 115,
-      isVipLocked: true,
-    ),
-    VpnServer(
-      countryLong: 'Japan (Tokyo)',
-      countryShort: 'JP',
-      ip: '219.100.37.214',
-      ping: 65,
-      speedMbps: 130,
-      isVipLocked: true,
-    ),
-  ];
-
+  List<VpnServer> _servers = [];
   VpnServer? _selectedServer;
-  Timer? _connectionTimer;
-  Duration _connectedDuration = Duration.zero;
-  double _downloadSpeed = 0.0;
-  double _uploadSpeed = 0.0;
+  bool _isLoadingServers = true;
+
   final List<double> _wavePoints = List.generate(24, (_) => 0.12);
   Timer? _waveTimer;
-
   late AnimationController _orbController;
 
   @override
   void initState() {
     super.initState();
-    _selectedServer = _servers.first;
     _orbController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 3),
     )..repeat(reverse: true);
 
-    _fetchRemoteConfig();
+    _initOpenVpnEngine();
+    _initializeApp();
+  }
+
+  void _initOpenVpnEngine() {
+    _openVpnEngine = OpenVPN(
+      onVpnStatusChanged: (data) {
+        if (!mounted) return;
+        setState(() => _vpnStatus = data);
+      },
+      onVpnStageChanged: (stage, rawStage) {
+        if (!mounted) return;
+        setState(() => _vpnStage = stage);
+        if (stage == VPNStage.connected) {
+          HapticFeedback.heavyImpact();
+          _startWaveAnimation();
+        } else if (stage == VPNStage.disconnected) {
+          _waveTimer?.cancel();
+        }
+      },
+    );
+
+    _openVpnEngine.initialize(
+      groupIdentifier: "group.com.wakavpn.app",
+      providerBundleIdentifier: "com.wakavpn.app.VPNExtension",
+      localizedDescription: "WAKA VPN Shield",
+    );
+  }
+
+  Future<void> _initializeApp() async {
+    await _fetchRemoteConfig();
+    await _fetchFreePublicServers();
   }
 
   Future<void> _fetchRemoteConfig() async {
@@ -181,414 +169,250 @@ class _WakaHomeScreenState extends State<WakaHomeScreen>
     } catch (_) {}
   }
 
-  // Native Android VPN Permission Dialog Trigger
-  Future<void> _requestNativeVpnPermission() async {
-    // Shows native bottom dialog prompting user for secure tunnel permission
-    await showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF0E131F),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-            side: const BorderSide(color: Color(0xFF00F5D4), width: 1),
-          ),
-          title: const Text(
-            'Connection Request',
-            style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-          ),
-          content: Text(
-            'WAKA VPN wants to set up a VPN connection that allows it to monitor network traffic. Only accept if you trust the source.\n\nConnecting to: ${_selectedServer?.countryLong}',
-            style: const TextStyle(color: Colors.white70, fontSize: 13),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                Navigator.pop(context);
-                setState(() => _connectionState = 0);
-              },
-              child: const Text('Cancel', style: TextStyle(color: Colors.redAccent)),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF00F5D4),
-                foregroundColor: Colors.black,
+  Future<void> _fetchFreePublicServers() async {
+    setState(() => _isLoadingServers = true);
+    try {
+      final response = await http
+          .get(Uri.parse('http://www.vpngate.net/api/iphone/'))
+          .timeout(const Duration(seconds: 12));
+
+      if (response.statusCode == 200) {
+        final lines = const LineSplitter().convert(response.body);
+        final List<VpnServer> parsedServers = [];
+
+        for (int i = 2; i < lines.length; i++) {
+          final cols = lines[i].split(',');
+          if (cols.length > 14 && cols[14].isNotEmpty) {
+            final int speedBits = int.tryParse(cols[4]) ?? 15000000;
+            final int pingMs = int.tryParse(cols[3]) ?? 42;
+            parsedServers.add(
+              VpnServer(
+                countryLong: cols[5],
+                countryShort: cols[6],
+                ip: cols[1],
+                ping: pingMs,
+                speedMbps: max(1, (speedBits / 1000000).round()),
+                ovpnConfigBase64: cols[14],
+                isVipLocked: _remoteConfig.isSubscriptionEnabled &&
+                    parsedServers.length < 3,
               ),
-              onPressed: () {
-                Navigator.pop(context);
-                _startTunnelConnection();
-              },
-              child: const Text('OK', style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-          ],
-        );
-      },
-    );
+            );
+          }
+          if (parsedServers.length >= 20) break;
+        }
+
+        if (parsedServers.isNotEmpty) {
+          setState(() {
+            _servers = parsedServers;
+            _selectedServer = parsedServers.first;
+            _isLoadingServers = false;
+          });
+          return;
+        }
+      }
+    } catch (_) {}
+
+    setState(() => _isLoadingServers = false);
   }
 
-  void _toggleVpnConnection() async {
+  Future<void> _toggleVpnConnection() async {
     HapticFeedback.mediumImpact();
     await _fetchRemoteConfig();
 
-    if (_connectionState == 0) {
-      if (_remoteConfig.isSubscriptionEnabled &&
-          (_selectedServer?.isVipLocked ?? false) &&
-          !_isUserVip) {
-        _showVipPaywallModal();
-        return;
+    if (_vpnStage == VPNStage.disconnected) {
+      if (_selectedServer == null) {
+        await _fetchFreePublicServers();
+        if (_selectedServer == null) return;
       }
 
-      setState(() => _connectionState = 1);
-      // Trigger native system permission dialog
-      await _requestNativeVpnPermission();
+      try {
+        final String decodedConfig =
+            utf8.decode(base64Decode(_selectedServer!.ovpnConfigBase64));
+
+        _openVpnEngine.connect(
+          decodedConfig,
+          "WAKA VPN - ${_selectedServer!.countryLong}",
+          username: "vpn",
+          password: "vpn",
+          certIsRequired: false,
+        );
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Connection failed, try another node')),
+        );
+      }
     } else {
-      _connectionTimer?.cancel();
-      _waveTimer?.cancel();
-      setState(() {
-        _connectionState = 0;
-        _downloadSpeed = 0.0;
-        _uploadSpeed = 0.0;
-      });
+      _openVpnEngine.disconnect();
+      setState(() => _vpnStage = VPNStage.disconnected);
     }
   }
 
-  void _startTunnelConnection() {
-    HapticFeedback.heavyImpact();
-    setState(() {
-      _connectionState = 2;
-      _connectedDuration = Duration.zero;
-    });
-    _startLiveTelemetry();
-  }
-
-  void _startLiveTelemetry() {
+  void _startWaveAnimation() {
     final random = Random();
-    _connectionTimer?.cancel();
-    _connectionTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+    _waveTimer?.cancel();
+    _waveTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
-        _connectedDuration += const Duration(seconds: 1);
-        _downloadSpeed = 22.5 + random.nextDouble() * 38.0;
-        _uploadSpeed = 6.2 + random.nextDouble() * 14.0;
         _wavePoints.removeAt(0);
         _wavePoints.add(0.2 + random.nextDouble() * 0.75);
       });
     });
   }
 
-  String _formatDuration(Duration d) {
-    String twoDigits(int n) => n.toString().padLeft(2, '0');
-    return "${twoDigits(d.inHours)}:${twoDigits(d.inMinutes.remainder(60))}:${twoDigits(d.inSeconds.remainder(60))}";
-  }
-
-  void _showVipPaywallModal() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (context) {
-        return BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
-          child: Container(
-            padding: const EdgeInsets.all(26),
-            decoration: BoxDecoration(
-              color: const Color(0xFF0E131F).withOpacity(0.95),
-              borderRadius:
-                  const BorderRadius.vertical(top: Radius.circular(32)),
-              border: Border.all(
-                color: const Color(0xFF00F5D4).withOpacity(0.35),
-                width: 1.5,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF00F5D4), Color(0xFF7B2CBF)],
-                    ),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: const Text(
-                    'WAKA VIP PASS',
-                    style: TextStyle(
-                      color: Colors.black,
-                      fontWeight: FontWeight.w900,
-                      fontSize: 12,
-                      letterSpacing: 1.2,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 18),
-                const Text(
-                  'Unlock Ultra-Fast Global Nodes',
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  'Zero speed limits, dedicated low-ping gaming servers, and unlimited encrypted bandwidth.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.white.withOpacity(0.65),
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: const Color(0xFF00F5D4)),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'WAKA Monthly Pro',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          SizedBox(height: 4),
-                          Text(
-                            'Instant activation • Cancel anytime',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.white54,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        'Rs. ${_remoteConfig.monthlyPricePkr}/mo',
-                        style: const TextStyle(
-                          fontSize: 20,
-                          fontWeight: FontWeight.w900,
-                          color: Color(0xFF00F5D4),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  height: 54,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF00F5D4),
-                      foregroundColor: Colors.black,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    onPressed: () => Navigator.pop(context),
-                    child: Text(
-                      'Activate VIP — Rs. ${_remoteConfig.monthlyPricePkr}',
-                      style: const TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   @override
   void dispose() {
     _orbController.dispose();
-    _connectionTimer?.cancel();
     _waveTimer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final Color primaryGlow = _connectionState == 2
+    final bool isConnected = _vpnStage == VPNStage.connected;
+    final bool isConnecting =
+        _vpnStage != VPNStage.disconnected && _vpnStage != VPNStage.connected;
+    final Color primaryGlow = isConnected
         ? const Color(0xFF00F5D4)
-        : (_connectionState == 1
-            ? const Color(0xFFFFBE0B)
-            : const Color(0xFF3A86FF));
+        : (isConnecting ? const Color(0xFFFFBE0B) : const Color(0xFF3A86FF));
 
     return Scaffold(
-      body: Stack(
-        children: [
-          Positioned(
-            top: -100,
-            left: -80,
-            child: Container(
-              width: 300,
-              height: 300,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: primaryGlow.withOpacity(0.15),
-              ),
-            ),
-          ),
-          Positioned(
-            bottom: -120,
-            right: -80,
-            child: Container(
-              width: 320,
-              height: 320,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: const Color(0xFF7B2CBF).withOpacity(0.15),
-              ),
-            ),
-          ),
-          BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 70, sigmaY: 70),
-            child: const SizedBox.expand(),
-          ),
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
-              child: Column(
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(22.0),
+          child: Column(
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: primaryGlow,
-                              boxShadow: [
-                                BoxShadow(color: primaryGlow, blurRadius: 10)
-                              ],
-                            ),
-                          ),
-                          const SizedBox(width: 10),
-                          const Text(
-                            'WAKA VPN',
-                            style: TextStyle(
-                              fontSize: 20,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 3,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (_remoteConfig.isSubscriptionEnabled)
-                        GestureDetector(
-                          onTap: _showVipPaywallModal,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 14, vertical: 7),
-                            decoration: BoxDecoration(
-                              gradient: const LinearGradient(
-                                colors: [Color(0xFF00F5D4), Color(0xFF7B2CBF)],
-                              ),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              'VIP • Rs.${_remoteConfig.monthlyPricePkr}',
-                              style: const TextStyle(
-                                color: Colors.black,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        )
-                      else
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.06),
-                            borderRadius: BorderRadius.circular(20),
-                            border: Border.all(color: Colors.white12),
-                          ),
-                          child: const Text(
-                            '100% FREE GLOBAL',
-                            style: TextStyle(
-                              color: Color(0xFF00F5D4),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  if (_remoteConfig.announcementBanner.isNotEmpty) ...[
-                    const SizedBox(height: 14),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.05),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Text(
-                        _remoteConfig.announcementBanner,
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(
-                            fontSize: 12, color: Colors.white70),
-                      ),
-                    ),
-                  ],
-                  const Spacer(),
-                  Text(
-                    _connectionState == 2
-                        ? 'WAKA SHIELD ACTIVE'
-                        : (_connectionState == 1
-                            ? 'AWAITING PERMISSION...'
-                            : 'TAP ORB TO CONNECT'),
+                  const Text(
+                    'WAKA VPN',
                     style: TextStyle(
-                      fontSize: 12,
-                      letterSpacing: 2,
-                      fontWeight: FontWeight.w700,
-                      color: primaryGlow,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    _formatDuration(_connectedDuration),
-                    style: const TextStyle(
-                      fontSize: 36,
-                      fontWeight: FontWeight.w300,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w900,
                       letterSpacing: 3,
                     ),
                   ),
-                  const SizedBox(height: 32),
-                  GestureDetector(
-                    onTap: _toggleVpnConnection,
-                    child: AnimatedBuilder(
-                      animation: _orbController,
-                      builder: (context, child) {
-                        final double pulse =
-                            1.0 + (_orbController.value * 0.08);
-                        return Transform.scale(
-                          scale: pulse,
-                          child: Container(
-                            width: 190,
-                            height: 190,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
- 
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.06),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Text(
+                      '100% FREE',
+                      style: TextStyle(
+                        color: Color(0xFF00F5D4),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                isConnected
+                    ? 'SECURE SHIELD ACTIVE'
+                    : (isConnecting ? 'CONNECTING...' : 'TAP ORB TO CONNECT'),
+                style: TextStyle(
+                  fontSize: 12,
+                  letterSpacing: 2,
+                  fontWeight: FontWeight.w700,
+                  color: primaryGlow,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                _vpnStatus?.duration ?? "00:00:00",
+                style: const TextStyle(
+                  fontSize: 36,
+                  fontWeight: FontWeight.w300,
+                  letterSpacing: 3,
+                ),
+              ),
+              const SizedBox(height: 32),
+              GestureDetector(
+                onTap: _toggleVpnConnection,
+                child: Container(
+                  width: 190,
+                  height: 190,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: RadialGradient(
+                      colors: [
+                        primaryGlow.withOpacity(0.45),
+                        const Color(0xFF0D1322),
+                      ],
+                    ),
+                    border: Border.all(
+                      color: primaryGlow.withOpacity(0.8),
+                      width: 2.5,
+                    ),
+                  ),
+                  child: Center(
+                    child: Icon(
+                      isConnected
+                          ? Icons.shield_rounded
+                          : Icons.power_settings_new_rounded,
+                      size: 64,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ),
+              const Spacer(),
+              GestureDetector(
+                onTap: () {
+                  showModalBottomSheet(
+                    context: context,
+                    backgroundColor: const Color(0xFF0B0F19),
+                    builder: (context) {
+                      return ListView.builder(
+                        itemCount: _servers.length,
+                        itemBuilder: (context, index) {
+                          final s = _servers[index];
+                          return ListTile(
+                            title: Text(s.countryLong),
+                            subtitle: Text('${s.speedMbps} Mbps • ${s.ping} ms'),
+                            onTap: () {
+                              Navigator.pop(context);
+                              setState(() => _selectedServer = s);
+                            },
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.06),
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(
+                        color: primaryGlow.withOpacity(0.35), width: 1.2),
+                  ),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          _selectedServer?.countryLong ?? 'Select Country',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                      ),
+                      const Icon(Icons.keyboard_arrow_up_rounded,
+                          color: Colors.white70),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
