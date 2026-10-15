@@ -1,4 +1,4 @@
-name: Build WAKA VPN (APK & PlayStore AAB)
+name: Build WAKA VPN (APK & AAB)
 
 on:
   push:
@@ -24,43 +24,25 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Auto-Generate Android Platform Files (Mobile Friendly)
+      - name: Auto-Generate Android Scaffold
         run: |
-          # Back up your custom pubspec and main.dart
           cp pubspec.yaml pubspec.yaml.bak
           cp lib/main.dart main.dart.bak
 
-          # Create full Android project scaffolding
           flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
 
-          # Restore your custom WAKA VPN code
           mv pubspec.yaml.bak pubspec.yaml
           mv main.dart.bak lib/main.dart
 
-          # Set App Display Name to "WAKA VPN" & Enable Cleartext HTTP for VPNGate API
-          sed -i 's/android:label="waka_vpn"/android:label="WAKA VPN"\n        android:usesCleartextTraffic="true"/g' android/app/src/main/AndroidManifest.xml
-
-          # Ensure minSdkVersion is at least 21 for OpenVPN
-          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
+          # Enforce MinSdk 21 and MultiDex for OpenVPN
+          sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21\n        multiDexEnabled true/g' android/app/build.gradle || true
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
+          
+          # Add internet and vpn permissions to manifest
+          sed -i 's/<application/<uses-permission android:name="android.permission.INTERNET"\/>\n    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"\/>\n    <application/g' android/app/src/main/AndroidManifest.xml
 
-      - name: Install Flutter Dependencies
+      - name: Install Dependencies
         run: flutter pub get
 
-      - name: Build Release APK
+      - name: Build APK
         run: flutter build apk --release
-
-      - name: Build Google Play Store Bundle (AAB)
-        run: flutter build appbundle --release
-
-      - name: Upload Ready WAKA VPN APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: WAKA-VPN-Release-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
-
-      - name: Upload Play Store AAB Bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: WAKA-VPN-PlayStore-AAB
-          path: build/app/outputs/bundle/release/app-release.aab
