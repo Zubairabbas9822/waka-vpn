@@ -27,8 +27,7 @@ jobs:
       - name: Auto-Generate Android Scaffold Cleanly
         run: |
           flutter create --project-name waka_vpn --org com.wakavpn.app --platforms android .
-
-          # Fix minSdk to 21 inside build.gradle for modern compatibility
+          # Fix minSdk for OpenVPN package
           sed -i 's/minSdk = flutter.minSdkVersion/minSdk = 21/g' android/app/build.gradle || true
           sed -i 's/minSdkVersion flutter.minSdkVersion/minSdkVersion 21/g' android/app/build.gradle || true
 
